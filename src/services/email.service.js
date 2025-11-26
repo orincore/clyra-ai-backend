@@ -5,10 +5,13 @@ let transporter;
 
 function getTransporter() {
   if (!transporter) {
+    const port = Number(env.SMTP_PORT || 587);
+    const secure = port === 465; // Zoho and many providers use 465 for implicit TLS
+
     transporter = nodemailer.createTransport({
       host: env.SMTP_HOST,
-      port: Number(env.SMTP_PORT || 587),
-      secure: false,
+      port,
+      secure,
       auth: {
         user: env.SMTP_USER,
         pass: env.SMTP_PASS,
