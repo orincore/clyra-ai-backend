@@ -7,7 +7,6 @@ import AppError from '../utils/appError.js';
 import env from '../config/env.js';
 import { uploadToS3, deleteFromS3, getKeyFromUrl } from '../config/s3.js';
 import path from 'path';
-import { sendEmail, buildOtpEmail, buildWelcomeEmail, buildSecurityAlertEmail } from '../services/email.service.js';
 import { redisClient } from '../config/redis.js';
 import { supabaseAdmin } from '../config/supabaseClient.js';
 
@@ -243,25 +242,8 @@ export const sendForgotPasswordEmailOtp = async (req, res, next) => {
     const { email } = req.body || {};
     if (!email) return next(new AppError('email is required', 400));
 
-    // Avoid user enumeration: always respond success, but only send email if user exists
-    const user = await userDB.findUserByIdentifier(email).catch(() => null);
-    if (user && user.id && user.email) {
-      const otp = generateOtp();
-      const ttlSeconds = 10 * 60;
-      const key = `pwd_email_public:${user.id}`;
-      await redisClient.del(key);
-      await redisClient.set(key, otp, ttlSeconds);
-
-      const { subject, text, html } = buildOtpEmail({ name: user.first_name || 'there', otp, minutes: 10, appName: env.APP_NAME });
-      const toEmail = (process.env.OTP_TEST_EMAIL && env.NODE_ENV !== 'production') ? process.env.OTP_TEST_EMAIL : user.email;
-      try {
-        await sendEmail({ to: toEmail, subject, text, html });
-      } catch (e) {
-        console.warn('[forgot-password] Failed to send OTP email:', e?.message || e);
-      }
-    }
-
-    return res.status(200).json({ status: 'success', message: 'If an account with that email exists, a reset code has been sent.' });
+    // Email-based password reset is disabled; always return success without sending any email
+    return res.status(200).json({ status: 'success', message: 'Password reset via email is currently disabled.' });
   } catch (error) {
     next(error);
   }
@@ -276,39 +258,8 @@ export const confirmForgotPasswordEmailOtp = async (req, res, next) => {
     if (!newPassword || String(newPassword).length < 8) {
       return next(new AppError('newPassword must be at least 8 characters long', 400));
     }
-
-    const user = await userDB.findUserByIdentifier(email);
-    if (!user) {
-      // Avoid enumeration: generic error
-      return next(new AppError('Invalid email or code.', 400));
-    }
-
-    const key = `pwd_email_public:${user.id}`;
-    const cached = await redisClient.get(key);
-    if (!cached) return next(new AppError('Code expired or not found. Please request a new code.', 400));
-    if (cached !== otp) return next(new AppError('Invalid verification code.', 400));
-
-    // Update password
-    const salt = await bcrypt.genSalt(12);
-    const hash = await bcrypt.hash(String(newPassword), salt);
-    const updated = await userDB.updateProfile(user.id, { password: hash, password_changed_at: new Date() });
-    await redisClient.del(key);
-
-    // Security alert email (best-effort)
-    if (env.SECURITY_ALERTS_ENABLED) {
-      try {
-        const ip = extractClientIp(req);
-        const location = await resolveIpLocation(ip);
-        const ua = req.headers['user-agent'] || '';
-        const whenISO = new Date().toISOString();
-        const { subject, text, html } = buildSecurityAlertEmail({ type: 'password_reset', name: user.first_name || 'there', appName: env.APP_NAME, ip, userAgent: ua, whenISO, location });
-        await sendEmail({ to: user.email, subject, text, html });
-      } catch (e) {
-        console.warn('[security-email] Failed to send password reset alert (public):', e?.message || e);
-      }
-    }
-
-    return res.status(200).json({ status: 'success', message: 'Password reset successfully.' , data: { user: updated } });
+    // Email-based password reset is disabled
+    return res.status(400).json({ status: 'fail', message: 'Password reset via email is currently disabled.' });
   } catch (error) {
     next(error);
   }
@@ -466,18 +417,8 @@ export const sendPasswordResetOtp = async (req, res, next) => {
       return res.status(200).json({ status: 'success', message: 'Password reset OTP sent via WhatsApp', data: { uuid: data.uuid, contactNumber: number, expiresIn: ttl } });
     }
 
-    // default to email
-    const otp = generateOtp();
-    const ttlSeconds = 10 * 60;
-    const key = `email_pwd:${user.id}`;
-    await redisClient.del(key);
-    const stored = await redisClient.set(key, otp, ttlSeconds);
-    if (!stored) return next(new AppError('Failed to create reset code. Please try again later.', 500));
-
-    const { subject, text, html } = buildOtpEmail({ name: user.first_name || 'there', otp, minutes: 10, appName: env.APP_NAME });
-    const toEmail = (process.env.OTP_TEST_EMAIL && env.NODE_ENV !== 'production') ? process.env.OTP_TEST_EMAIL : user.email;
-    await sendEmail({ to: toEmail, subject, text, html });
-    return res.status(200).json({ status: 'success', message: 'Password reset code sent to your email.' });
+    // Email-based password reset codes are disabled
+    return res.status(400).json({ status: 'fail', message: 'Password reset via email is currently disabled.' });
   } catch (error) {
     next(error);
   }
@@ -512,47 +453,11 @@ export const confirmPasswordResetOtp = async (req, res, next) => {
       const hash = await bcrypt.hash(String(newPassword), salt);
       const updated = await userDB.updateProfile(user.id, { password: hash, password_changed_at: new Date() });
       await redisClient.del(key);
-      // Security alert email (best-effort)
-      if (env.SECURITY_ALERTS_ENABLED) {
-        try {
-          const ip = extractClientIp(req);
-          const location = await resolveIpLocation(ip);
-          const ua = req.headers['user-agent'] || '';
-          const whenISO = new Date().toISOString();
-          const { subject, text, html } = buildSecurityAlertEmail({ type: 'password_reset', name: user.first_name || 'there', appName: env.APP_NAME, ip, userAgent: ua, whenISO, location });
-          await sendEmail({ to: user.email, subject, text, html });
-        } catch (e) {
-          console.warn('[security-email] Failed to send password reset alert (phone):', e?.message || e);
-        }
-      }
       return res.status(200).json({ status: 'success', message: 'Password reset successfully.', data: { user: updated } });
     }
 
-    // email method
-    if (!otp) return next(new AppError('OTP is required', 400));
-    const key = `email_pwd:${user.id}`;
-    const cached = await redisClient.get(key);
-    if (!cached) return next(new AppError('OTP expired or not found. Please request a new code.', 400));
-    if (cached !== otp) return next(new AppError('Invalid verification code.', 400));
-
-    const salt = await bcrypt.genSalt(12);
-    const hash = await bcrypt.hash(String(newPassword), salt);
-    const updated = await userDB.updateProfile(user.id, { password: hash, password_changed_at: new Date() });
-    await redisClient.del(key);
-    // Security alert email (best-effort)
-    if (env.SECURITY_ALERTS_ENABLED) {
-      try {
-        const ip = extractClientIp(req);
-        const location = await resolveIpLocation(ip);
-        const ua = req.headers['user-agent'] || '';
-        const whenISO = new Date().toISOString();
-        const { subject, text, html } = buildSecurityAlertEmail({ type: 'password_reset', name: user.first_name || 'there', appName: env.APP_NAME, ip, userAgent: ua, whenISO, location });
-        await sendEmail({ to: user.email, subject, text, html });
-      } catch (e) {
-        console.warn('[security-email] Failed to send password reset alert (email):', e?.message || e);
-      }
-    }
-    return res.status(200).json({ status: 'success', message: 'Password reset successfully.', data: { user: updated } });
+    // Email-based password reset confirmation is disabled
+    return res.status(400).json({ status: 'fail', message: 'Password reset via email is currently disabled.' });
   } catch (error) {
     next(error);
   }
@@ -599,17 +504,6 @@ export const verifyPhoneOtp = async (req, res, next) => {
 
     // Compute overall verification according to rules
     const updated = await computeAndApplyFullVerification(user.id);
-    // If this action resulted in full verification, send welcome email
-    if (!user.is_verified && updated?.is_verified) {
-      try {
-        const ctaUrl = env.APP_URL ? `${env.APP_URL.replace(/\/$/, '')}/characters/new` : '';
-        const { subject, text, html } = buildWelcomeEmail({ name: user.first_name || 'there', appName: env.APP_NAME, ctaUrl });
-        await sendEmail({ to: user.email, subject, text, html });
-      } catch (e) {
-        console.warn('[welcome-email] Failed to send after phone verification:', e?.message || e);
-      }
-    }
-
     res.status(200).json({
       status: 'success',
       message: 'Phone verified successfully',
@@ -629,26 +523,8 @@ export const sendEmailVerification = async (req, res, next) => {
     const user = await userDB.getUserById(req.user.id);
     if (!user) return next(new AppError('User not found', 404));
 
-    if (user.is_verified) {
-      return res.status(200).json({ status: 'success', message: 'Email already verified.' });
-    }
-
-    const otp = generateOtp();
-    const ttlSeconds = 10 * 60; // 10 minutes
-    const key = `email_verif:${user.id}`;
-
-    // Store OTP in Redis with TTL (overwrite any existing)
-    await redisClient.del(key);
-    const stored = await redisClient.set(key, otp, ttlSeconds);
-    if (!stored) {
-      return next(new AppError('Failed to create verification code. Please try again later.', 500));
-    }
-
-    const { subject, text, html } = buildOtpEmail({ name: user.first_name || 'there', otp, minutes: 10, appName: env.APP_NAME });
-    const toEmail = (process.env.OTP_TEST_EMAIL && env.NODE_ENV !== 'production') ? process.env.OTP_TEST_EMAIL : user.email;
-    await sendEmail({ to: toEmail, subject, text, html });
-
-    res.status(200).json({ status: 'success', message: 'Verification code sent to your email.' });
+    // Email verification flow is disabled
+    res.status(200).json({ status: 'success', message: 'Email verification is disabled.' });
   } catch (error) {
     next(error);
   }
@@ -663,38 +539,8 @@ export const verifyEmailOtp = async (req, res, next) => {
     const user = await userDB.getUserById(req.user.id);
     if (!user) return next(new AppError('User not found', 404));
 
-    if (user.is_verified) {
-      return res.status(200).json({ status: 'success', message: 'Email already verified.' });
-    }
-
-    const key = `email_verif:${user.id}`;
-    const cached = await redisClient.get(key);
-    if (!cached) {
-      return next(new AppError('OTP expired or not found. Please request a new code.', 400));
-    }
-
-    if (cached !== otp) {
-      return next(new AppError('Invalid verification code.', 400));
-    }
-
-    // Mark channel verified
-    await userDB.updateProfile(user.id, { is_email_verified: true });
-    await redisClient.del(key);
-
-    // Compute overall verification according to rules
-    const updated = await computeAndApplyFullVerification(user.id);
-    // If this action resulted in full verification, send welcome email
-    if (!user.is_verified && updated?.is_verified) {
-      try {
-        const ctaUrl = env.APP_URL ? `${env.APP_URL.replace(/\/$/, '')}/characters/new` : '';
-        const { subject, text, html } = buildWelcomeEmail({ name: user.first_name || 'there', appName: env.APP_NAME, ctaUrl });
-        await sendEmail({ to: user.email, subject, text, html });
-      } catch (e) {
-        console.warn('[welcome-email] Failed to send after email verification:', e?.message || e);
-      }
-    }
-
-    res.status(200).json({ status: 'success', message: 'Email verified successfully.', data: { user: updated } });
+    // Email verification confirmation is disabled
+    res.status(200).json({ status: 'success', message: 'Email verification is disabled.' });
   } catch (error) {
     next(error);
   }

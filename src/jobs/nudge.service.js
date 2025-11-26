@@ -97,32 +97,8 @@ export async function insertAssistantMessage(sessionId, content, is_nsfw = false
 
 // Optional: email ping
 export async function maybeSendEmailNudge(userId, character) {
-  if (!env.NUDGE_EMAIL_ENABLED) return;
-  try {
-    const { data: prof } = await supabaseAdmin
-      .from('user_profiles')
-      .select('email, username, first_name, last_name, is_email_verified')
-      .eq('id', userId)
-      .single();
-    if (!prof?.email) return;
-    if (env.NUDGE_EMAIL_ONLY_IF_VERIFIED && !prof.is_email_verified) return;
-
-    const { sendEmail, buildNudgeEmail } = await import('../services/email.service.js');
-    const to = prof.email;
-    const appName = env.APP_NAME || 'Clyra AI';
-    const ctaUrl = env.APP_URL ? `${env.APP_URL.replace(/\/$/, '')}/chats` : '';
-    const previewText = `${character?.name || 'Your character'} left you a message`;
-    const { subject, text, html } = buildNudgeEmail({
-      name: prof.first_name || prof.username || 'there',
-      characterName: character?.name || 'Your character',
-      appName,
-      ctaUrl,
-      previewText
-    });
-    await sendEmail({ to, subject, text, html });
-  } catch (e) {
-    console.warn('[nudges] email send failed:', e?.message || e);
-  }
+  // Email nudges are disabled; function kept for API compatibility
+  return;
 }
 
 // Per-user rate limit using Redis: max per day
